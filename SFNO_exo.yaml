@@ -1,0 +1,51 @@
+### base config ###
+full_field: &FULL_FIELD
+  loss: 'l2'
+  lr: 1E-3
+  scheduler: 'ReduceLROnPlateau'
+  num_data_workers: 4
+  dt: 1 # how many timesteps ahead the model will predict
+  n_history: 0 #how many previous timesteps to consider
+  prediction_type: 'iterative'
+  prediction_length: 41 #applicable only if prediction_type == 'iterative'
+  n_initial_conditions: 5 #applicable only if prediction_type == 'iterative'
+  ics_type: "default"
+  save_raw_forecasts: !!bool True
+  save_channel: !!bool False
+  masked_acc: !!bool False
+  maskpath: None
+  perturb: !!bool False
+  add_grid: !!bool False
+  N_grid_channels: 0
+  gridtype: 'sinusoidal' #options 'sinusoidal' or 'linear'
+  roll: !!bool False
+  max_epochs: 50
+  batch_size: 64
+
+  orography: !!bool False
+  orography_path: None
+
+  log_to_screen: !!bool True
+  log_to_wandb: !!bool True
+  save_checkpoint: !!bool True
+
+  enable_nhwc: !!bool False
+  optimizer_type: 'FusedAdam'
+  crop_size_x: None
+  crop_size_y: None
+
+  two_step_training: !!bool False
+  plot_animations: !!bool False
+
+  add_noise: !!bool False
+  noise_std: 0
+
+sfno_backbone: &backbone
+  <<: *FULL_FIELD
+  log_to_wandb: !!bool True
+  lr: 1E-5
+  batch_size: 4
+  max_epochs: 150
+  scheduler: 'CosineAnnealingLR'
+  in_channels: 13
+  out_channels: 12
