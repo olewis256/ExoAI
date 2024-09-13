@@ -194,15 +194,15 @@ if __name__ == '__main__':
     dataset1 = GetDataset(path1, 1)
     dataset2 = GetDataset(path2, 5)
 
-    sampler1 = DistributedSampler(dataset1, shuffle=True) if world_size > 1 else None
-    sampler2 = DistributedSampler(dataset2, shuffle=True) if world_size > 1 else None
+    sampler1 = DistributedSampler(dataset1) if world_size > 1 else None
+    sampler2 = DistributedSampler(dataset2) if world_size > 1 else None
 
     
     dataloader1 = DataLoader(dataset1,
                           batch_size=params.batch_size,
                           sampler=sampler1,
                           shuffle=False,
-                            num_workers=4,
+                            num_workers=2,
                             pin_memory=torch.cuda.is_available(),
                           drop_last=True,
                             prefetch_factor=2
@@ -211,7 +211,7 @@ if __name__ == '__main__':
                           batch_size=params.batch_size,
                           sampler=sampler2,
                           shuffle=False,
-                            num_workers=4,
+                            num_workers=2,
                             pin_memory=torch.cuda.is_available(),
                           drop_last=True,
                             prefetch_factor=2
@@ -222,12 +222,12 @@ if __name__ == '__main__':
     in_channels = params.in_channels
     out_channels = params.out_channels
 
-    model = SFNO(params={},spectral_transform="sht",img_shape=(90, 144), in_chans=in_channels,
+    model = SFNO(params={},spectral_transform="sht",filter_type='linear',img_shape=(90, 144), in_chans=in_channels,
                                          out_chans=out_channels,
-                                         num_layers=2, num_blocks=2).to(device)
+                                         num_layers=8,operator_type='dhconv',scale_factor=1,spectral_layers=3, embed_dim=256).to(device)
     
     if world_size > 1:
-        model = DistributedDataParallel(model, find_unused_parameters=False)
+        model = DistributedDataParallel(model, broadcast_buffers=False )
     
     #logging.info("number of trainable parameters: ", count_parameters())
     optimizer = torch.optim.Adam(model.parameters(), lr = params.lr)
@@ -252,15 +252,16 @@ if __name__ == '__main__':
 
     scheduler = CosineAnnealingLR(optimizer, T_max=params.max_epochs)
    
-    torch.autograd.set_detect_anomaly(True)
+    #torch.autograd.set_detect_anomaly(True)
 
     gscaler = torch.amp.GradScaler()
 
     for j in range(params.max_epochs):
         logging.info(j)
         i = 0
-        sampler1.set_epoch(j)
-        sampler2.set_epoch(j)
+        if world_size > 1:
+            sampler1.set_epoch(j)
+            sampler2.set_epoch(j)
         for (data1, data2) in zip(dataloader1, dataloader2):
 
             inp1, tar1 = map(lambda x: x.to(device, dtype=torch.float), data1)
@@ -273,20 +274,20 @@ if __name__ == '__main__':
             
             model.zero_grad()
 
-            with torch.amp.autocast(device_type='cuda', enabled=False):
+            with torch.amp.autocast(device_type='cuda', enabled=True):
 
                 gen1 = model(inp1)
                 loss1 = loss_obj(gen1, tar1)
 
-               # gen2 = model(inp2)
-               # loss2 = loss_obj(gen2, tar2)
+                gen2 = model(inp2)
+                loss2 = loss_obj(gen2, tar2)
 
                 if torch.isnan(gen1).any():# or torch.isnan(gen2).any():
                     logging.info("NaN detected in gen")
                     continue  # Skip the current iteration
 
             
-            loss = loss1 #+ loss2
+            loss = loss1 + loss2
 
             gscaler.scale(loss).backward()
 
@@ -302,10 +303,10 @@ if __name__ == '__main__':
                 continue  
 
 
-            if i%1 == 0:
+            if i%10 == 0:
                 if local_rank==0:
                     logging.info("save")
-                    logging.info(f"Epoch {j}, iteration {i}, Loss 1: {criterion(gen1, tar1).item()}")#, Loss 2: {criterion(gen2, tar2).item()}") 
+                    logging.info(f"Epoch {j}, iteration {i}, Loss 1: {criterion(gen1, tar1).item()}, Loss 2: {criterion(gen2, tar2).item()}") 
                     save_checkpoint(model)
                     logging.info(time.time() - start)
 
