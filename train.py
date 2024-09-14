@@ -31,7 +31,7 @@ def count_parameters():
 
 def save_checkpoint(model):
  
-    torch.save({'model_state': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, 'sfno_ckpt_amp_full.tar')
+    torch.save({'model_state': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, 'sfno_ckpt_amp_3.tar')
 
 def restore_checkpoint(checkpoint_path, model):
 
@@ -187,36 +187,46 @@ if __name__ == '__main__':
 
     path1 = "data/omega/"
     path2 = "data/omega_0_5/"
+    path3 = "data/omega_4/"
 
     Y, X = np.meshgrid(np.linspace(-90, 90, 90), np.linspace(0, 361, 144))
     Yp, Xp = np.meshgrid(np.linspace(0, 4, 4), np.linspace(-90, 90, 90))
 
     dataset1 = GetDataset(path1, 1)
     dataset2 = GetDataset(path2, 5)
+    dataset3 = GetDataset(path3, 10)
 
     sampler1 = DistributedSampler(dataset1) if world_size > 1 else None
     sampler2 = DistributedSampler(dataset2) if world_size > 1 else None
-
+    sampler3 = DistributedSampler(dataset3) if world_size > 1 else None
     
     dataloader1 = DataLoader(dataset1,
-                          batch_size=params.batch_size,
-                          sampler=sampler1,
-                          shuffle=False,
-                            num_workers=2,
-                            pin_memory=torch.cuda.is_available(),
-                          drop_last=True,
-                            prefetch_factor=2
-                         )
+            batch_size=params.batch_size,
+            sampler=sampler1,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=torch.cuda.is_available(),
+            drop_last=True
+            )
+
     dataloader2 = DataLoader(dataset2,
-                          batch_size=params.batch_size,
-                          sampler=sampler2,
-                          shuffle=False,
-                            num_workers=2,
-                            pin_memory=torch.cuda.is_available(),
-                          drop_last=True,
-                            prefetch_factor=2
-                         )
-    
+            batch_size=params.batch_size,
+            sampler=sampler2,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=torch.cuda.is_available(),
+            drop_last=True
+            )
+   
+    dataloader3 = DataLoader(dataset3,
+            batch_size = params.batch_size,
+            sampler=sampler3,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=torch.cuda.is_available(),
+            drop_last=True
+            )
+
     device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
 
     in_channels = params.in_channels
@@ -224,7 +234,7 @@ if __name__ == '__main__':
 
     model = SFNO(params={},spectral_transform="sht",filter_type='linear',img_shape=(90, 144), in_chans=in_channels,
                                          out_chans=out_channels,
-                                         num_layers=8,operator_type='dhconv',scale_factor=1,spectral_layers=3, embed_dim=256).to(device)
+                                        num_layers=8,operator_type='dhconv',scale_factor=1,spectral_layers=3, embed_dim=256).to(device)
     
     if world_size > 1:
         model = DistributedDataParallel(model, broadcast_buffers=False )
@@ -241,14 +251,16 @@ if __name__ == '__main__':
 
     logging.info("length of dataloader1:{}".format(len(dataloader1)))
     logging.info("length of dataloader2:{}".format(len(dataloader2)))
+    logging.info("length of dataloader3:{}".format(len(dataloader3)))
 
     logging.info(params.max_epochs)
-    #restore_checkpoint('sfno_ckpt_amp_full.tar', model)
+    #restore_checkpoint('sfno_ckpt_amp_3.tar', model)
     
 #     1 for 1, 5 for 0.5
 
     RR_1 = torch.full((params.batch_size,1,90,144), 1).to(device, dtype = torch.float)
     RR_2 = torch.full((params.batch_size,1,90,144), 5).to(device, dtype = torch.float)
+    RR_3 = torch.full((params.batch_size,1,90,144),10).to(device, dtype = torch.float)
 
     scheduler = CosineAnnealingLR(optimizer, T_max=params.max_epochs)
    
@@ -262,32 +274,39 @@ if __name__ == '__main__':
         if world_size > 1:
             sampler1.set_epoch(j)
             sampler2.set_epoch(j)
-        for (data1, data2) in zip(dataloader1, dataloader2):
+            sampler3.set_epoch(j)
+        for (data1, data2, data3) in zip(dataloader1, dataloader2, dataloader3):
 
             inp1, tar1 = map(lambda x: x.to(device, dtype=torch.float), data1)
             inp2, tar2 = map(lambda x: x.to(device, dtype=torch.float), data2)
+            inp3, tar3 = map(lambda x: x.to(device, dtype=torch.float), data3)
 
             inp1 = inp1.to(memory_format=torch.channels_last)
             tar1 = tar1.to(memory_format=torch.channels_last)
             inp2 = inp2.to(memory_format=torch.channels_last)
             tar2 = tar2.to(memory_format=torch.channels_last)
+            inp3 = inp3.to(memory_format=torch.channels_last)
+            tar3 = tar3.to(memory_format=torch.channels_last)
             
             model.zero_grad()
 
             with torch.amp.autocast(device_type='cuda', enabled=True):
 
-                gen1 = model(inp1)
+                gen1 = model(inp1).to(device, dtype = torch.float)
                 loss1 = loss_obj(gen1, tar1)
 
-                gen2 = model(inp2)
+                gen2 = model(inp2).to(device, dtype = torch.float)
                 loss2 = loss_obj(gen2, tar2)
+
+                gen3 = model(inp3).to(device, dtype = torch.float)
+                loss3 = loss_obj(gen3, tar3)
 
                 if torch.isnan(gen1).any():# or torch.isnan(gen2).any():
                     logging.info("NaN detected in gen")
                     continue  # Skip the current iteration
 
             
-            loss = loss1 + loss2
+            loss = loss1 + loss2 + loss3
 
             gscaler.scale(loss).backward()
 
@@ -306,7 +325,7 @@ if __name__ == '__main__':
             if i%10 == 0:
                 if local_rank==0:
                     logging.info("save")
-                    logging.info(f"Epoch {j}, iteration {i}, Loss 1: {criterion(gen1, tar1).item()}, Loss 2: {criterion(gen2, tar2).item()}") 
+                    logging.info(f"Epoch {j}, iteration {i}, Loss 1: {criterion(gen1, tar1).item()}, Loss 2: {criterion(gen2, tar2).item()}, Loss 3: {criterion(gen3, tar3).item}") 
                     save_checkpoint(model)
                     logging.info(time.time() - start)
 
