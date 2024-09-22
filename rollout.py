@@ -32,14 +32,17 @@ def save_checkpoint(model):
 
 def restore_checkpoint(checkpoint_path, model):
 
-    if torch.cuda.device_count() > 1:
-        model = torch.nn.DataParallel(model)
-
     checkpoint = torch.load(checkpoint_path)
     
     state_dict = checkpoint['model_state']
-    
-    model.load_state_dict(state_dict)
+    new_state_dict = {}
+
+    for key in state_dict:
+        new_key = key.replace('module.', '') if key.startswith('module.') else key
+        new_state_dict[new_key] = state_dict[key]
+
+    model.load_state_dict(new_state_dict)
+
 
     
 
@@ -56,16 +59,16 @@ class GetDataset(Dataset):
         self.normalise = True #by default turn on normalization if not specified in config
         self._get_files_stats()
     def _get_files_stats(self):
-        self.files_paths = glob.glob(self.location + "/omega_all_*.nc") #collect .pc files within omega directory
+        self.files_paths = glob.glob(self.location + "/umglaa.pc000000480_00") #collect .pc files within omega directory
         self.files_paths.sort()
         self.n_years = len(self.files_paths)
         print("files: ", len(self.files_paths))
         
-        self.n_samples_per_cube = 2080
+        self.n_samples_per_cube = 160
         self.img_shape_x = 144
         self.img_shape_y =90
  
-        self.n_samples_total = self.n_samples_per_cube * self.n_years
+        self.n_samples_total = 100#self.n_samples_per_cube * self.n_years
 
         self.files = [None for _ in range(self.n_years)]
 
@@ -84,17 +87,17 @@ class GetDataset(Dataset):
         data[5] = regridder(data[5])
         data[6] = regridder(data[6])
 
-        temp_mean = data[0].collapsed('time', iris.analysis.MEAN)
-        u_mean = data[5].collapsed('time', iris.analysis.MEAN)
-        v_mean = data[6].collapsed('time', iris.analysis.MEAN)
+        self.temp_mean = data[0].collapsed('time', iris.analysis.MEAN)
+        self.u_mean = data[5].collapsed('time', iris.analysis.MEAN)
+        self.v_mean = data[6].collapsed('time', iris.analysis.MEAN)
 
-        temp_std = data[0].collapsed('time', iris.analysis.STD_DEV)
-        u_std = data[5].collapsed('time', iris.analysis.STD_DEV)
-        v_std = data[6].collapsed('time', iris.analysis.STD_DEV)
+        self.temp_std = data[0].collapsed('time', iris.analysis.STD_DEV)
+        self.u_std = data[5].collapsed('time', iris.analysis.STD_DEV)
+        self.v_std = data[6].collapsed('time', iris.analysis.STD_DEV)
 
-        data[0] = (data[0] - temp_mean) / (1e-8 + temp_std)
-        data[5] = (data[5] - u_mean) / (1e-8 + u_std)
-        data[6] = (data[6] - v_mean) / (1e-8 + v_std)
+        data[0] = (data[0] - self.temp_mean) / (1e-8 + self.temp_std)
+        data[5] = (data[5] - self.u_mean) / (1e-8 + self.u_std)
+        data[6] = (data[6] - self.v_mean) / (1e-8 + self.v_std)
 
         self.cubes = []
         self.surf = []
@@ -109,6 +112,8 @@ class GetDataset(Dataset):
 
         self.output = np.reshape(self.cubes, (self.n_samples_per_cube,self.out_chan, self.img_shape_y, self.img_shape_x)) #quick test, only use 950 hPa temperature
         
+        self.output = self.output[0:self.n_samples_total,:,:,:]
+
     def __len__(self):
         return self.n_samples_total
 
@@ -142,9 +147,7 @@ class GetDataset(Dataset):
     
             target = np.reshape(target, (self.out_chan, self.img_shape_y, self.img_shape_x))
             
-        sample = np.roll(sample, y_roll, axis = -1)
-        target = np.roll(target, y_roll, axis = -1)
-
+        
         return torch.as_tensor(sample, dtype=torch.float), torch.as_tensor(target, dtype=torch.float)
 
 
@@ -166,20 +169,7 @@ if __name__ == '__main__':
     
     params = YParams(os.path.abspath(args.yaml_config), args.config)
 
-    world_size = int(os.environ.get('WORLD_SIZE', 1))
-    if world_size > 1:
-        dist.init_process_group(backend='nccl',
-                            init_method='env://')
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
-        torch.backends.cudnn.benchmark = True
-        rank = dist.get_rank()
-    else:
-        local_rank = 0
-        rank = 0
-
-    logging.info("World size: {}, local rank: {}".format(world_size, local_rank))
-
+    
     path1 = "data/omega/"
     path2 = "data/omega_0_5/"
     path3 = "data/omega_4/"
@@ -187,40 +177,36 @@ if __name__ == '__main__':
     Y, X = np.meshgrid(np.linspace(-90, 90, 90), np.linspace(0, 361, 144))
     Yp, Xp = np.meshgrid(np.linspace(0, 4, 4), np.linspace(-90, 90, 90))
 
-    dataset1 = GetDataset(path1, 1)
-    dataset2 = GetDataset(path2, 5)
-    dataset3 = GetDataset(path3, 10)
+    dataset1 = GetDataset(path3, 10)
+    #dataset2 = GetDataset(path2, 5)
+    #dataset3 = GetDataset(path3, 10)
 
-    sampler1 = DistributedSampler(dataset1, shuffle=True) if world_size > 1 else None
-    sampler2 = DistributedSampler(dataset2, shuffle=True) if world_size > 1 else None
-    sampler3 = DistributedSampler(dataset3, shuffle=True) if world_size > 1 else None
-    
     dataloader1 = DataLoader(dataset1,
-            batch_size=params.batch_size,
-            sampler=sampler1,
+            batch_size=1,
+            
             shuffle=False,
-            num_workers=2,
+            num_workers=0,
             pin_memory=torch.cuda.is_available(),
             drop_last=True
             )
 
-    dataloader2 = DataLoader(dataset2,
-            batch_size=params.batch_size,
-            sampler=sampler2,
-            shuffle=False,
-            num_workers=2,
-            pin_memory=torch.cuda.is_available(),
-            drop_last=True
-            )
+    #dataloader2 = DataLoader(dataset2,
+    #        batch_size=1,
+            
+    #        shuffle=False,
+    #        num_workers=0,
+    #        pin_memory=torch.cuda.is_available(),
+    #        drop_last=True
+    #        )
    
-    dataloader3 = DataLoader(dataset3,
-            batch_size = params.batch_size,
-            sampler=sampler3,
-            shuffle=False,
-            num_workers=2,
-            pin_memory=torch.cuda.is_available(),
-            drop_last=True
-            )
+    #dataloader3 = DataLoader(dataset3,
+    #        batch_size = 1,
+            
+    #        shuffle=False,
+    #        num_workers=0,
+    #        pin_memory=torch.cuda.is_available(),
+    #        drop_last=True
+    #        )
 
     device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
 
@@ -235,104 +221,70 @@ if __name__ == '__main__':
 
     model.to(device)
 
-    if world_size > 1:
-        model = DistributedDataParallel(model, broadcast_buffers=False )
     
-    #logging.info("number of trainable parameters: ", count_parameters())
-    optimizer = torch.optim.Adam(model.parameters(), lr = params.lr)
-    loss_obj = LpLoss()
-    criterion = nn.MSELoss()
     iters = 0
     tr_time = 0
     data_time = 0
-    
-    model.train()
 
     logging.info("length of dataloader1:{}".format(len(dataloader1)))
-    logging.info("length of dataloader2:{}".format(len(dataloader2)))
-    logging.info("length of dataloader3:{}".format(len(dataloader3)))
+    #logging.info("length of dataloader2:{}".format(len(dataloader2)))
+    #logging.info("length of dataloader3:{}".format(len(dataloader3)))
 
-    logging.info(params.max_epochs)
     
 #     1 for 1, 5 for 0.5
 
-    RR_1 = torch.full((params.batch_size,1,90,144), 1).to(device, dtype = torch.float)
-    RR_2 = torch.full((params.batch_size,1,90,144), 5).to(device, dtype = torch.float)
-    RR_3 = torch.full((params.batch_size,1,90,144),10).to(device, dtype = torch.float)
+    RR_1 = torch.full((1,1,90,144), 1).to(device, dtype = torch.float)
+    RR_2 = torch.full((1,1,90,144), 5).to(device, dtype = torch.float)
+    RR_3 = torch.full((1,1,90,144),10).to(device, dtype = torch.float)
 
-    scheduler = CosineAnnealingLR(optimizer, T_max=params.max_epochs)
-   
-    #torch.autograd.set_detect_anomaly(True)
-
-    gscaler = torch.amp.GradScaler()
-
-    for j in range(params.max_epochs):
-        logging.info(j)
-        i = 0
-        if world_size > 1:
-            sampler1.set_epoch(j)
-            sampler2.set_epoch(j)
-            sampler3.set_epoch(j)
-        for (data1, data2, data3) in zip(dataloader1, dataloader2, dataloader3):
-
-            inp1, tar1 = map(lambda x: x.to(device, dtype=torch.float), data1)
-            inp2, tar2 = map(lambda x: x.to(device, dtype=torch.float), data2)
-            inp3, tar3 = map(lambda x: x.to(device, dtype=torch.float), data3)
-
-            inp1 = inp1.to(memory_format=torch.channels_last)
-            tar1 = tar1.to(memory_format=torch.channels_last)
-            inp2 = inp2.to(memory_format=torch.channels_last)
-            tar2 = tar2.to(memory_format=torch.channels_last)
-            inp3 = inp3.to(memory_format=torch.channels_last)
-            tar3 = tar3.to(memory_format=torch.channels_last)
-                    
-            model.zero_grad()
-
-            with torch.amp.autocast(device_type='cuda', enabled=True):
-
-                gen1 = model(inp1).to(device, dtype = torch.float)
-                loss1 = loss_obj(gen1, tar1)
-
-                gen2 = model(inp2).to(device, dtype = torch.float)
-                loss2 = loss_obj(gen2, tar2)
-
-                gen3 = model(inp3).to(device, dtype = torch.float)
-                loss3 = loss_obj(gen3, tar3)
-
-                if torch.isnan(gen1).any():# or torch.isnan(gen2).any():
-                    logging.info("NaN detected in gen")
-                    continue  # Skip the current iteration
-
+    fig, (ax1, ax2) = plt.subplots(1,2, sharey=True)  
+    
+    i = 0
+    for data1 in dataloader1:
+        logging.info(i)
+        inp1, tar1 = map(lambda x: x.to(device, dtype=torch.float), data1)
             
-            loss = loss1 + loss2 + loss3
+        inp1 = inp1.to(memory_format=torch.channels_last)
+        tar1 = tar1.to(memory_format=torch.channels_last)
+        
+        tar = tar1.detach().cpu().numpy()[:,4:8,:,:]*np.expand_dims(dataset1.temp_std.data[4:8,:,:], axis=0) + np.expand_dims(dataset1.temp_mean.data[4:8,:,:], axis=0)
+    
+        if i == 0:
+            gen = model(inp1).to(device, dtype = torch.float)
+            predict = gen.detach().cpu().numpy()[:,4:8,:,:]*np.expand_dims(dataset1.temp_std.data[4:8,:,:], axis=0) + np.expand_dims(dataset1.temp_mean.data[4:8,:,:], axis=0)
+        else:
+            inp = gen.detach()
+            inp = torch.cat((inp, RR_3), axis=1).to(device, dtype = torch.float)               
+            gen = model(inp).to(device, dtype = torch.float)
+            predict = gen.detach().cpu().numpy()[:,4:8,:,:]*np.expand_dims(dataset1.temp_std.data[4:8,:,:], axis=0) + np.expand_dims(dataset1.temp_mean.data[4:8,:,:], axis=0)
 
-            gscaler.scale(loss).backward()
+        contour1 = ax1.contourf(X, Y, predict[0,0,:,:].T, levels=30)
+        contour2 = ax2.contourf(X, Y, tar[0,0,:,:].T, levels=30)
 
-            gscaler.step(optimizer)
+        ax1.set_xlabel("Longtiude (deg.)")
+        ax2.set_xlabel("Longitude (deg.)")
+        ax1.set_ylabel("Latitude (deg.)")
+        ax1.set_title("SFNO (4x)")
+        ax2.set_title("UM (4x)")
+        
 
-            gscaler.update()
+        if i < 10:
+            plt.savefig("plots/rollout_00{}.png".format(i))
+        elif i < 100:
+            plt.savefig("plots/rollout_0{}.png".format(i))
+        else:
+            plt.savefig("plots/rollout_{}.png".format(i))
+        
+        ax1.clear()
+        ax2.clear()
 
-            #loss.backward()
-            #optimizer.step()
-
-            if torch.isnan(loss).any():
-                logging.info("NaN detected in loss")
-                continue  
-
-
-            if i%50 == 0:
-                if local_rank==0:
-                    logging.info("save")
-                    logging.info(f"Epoch {j}, iteration {i}, Loss 1: {criterion(gen1, tar1).item()}, Loss 2: {criterion(gen2, tar2).item()}, Loss 3: {criterion(gen3, tar3).item()}") 
-                    logging.info(f"Total loss: {loss.item()}")
-                    save_checkpoint(model)
-                    logging.info(time.time() - start)
-
-            i += 1
-
-        scheduler.step()
-            
+        del tar1
+        del inp1
+        del tar
+        torch.cuda.empty_cache
+    
+        if i>100:
+            break
+        i+= 1    
     end = time.time()
-    logging.info(end - start)
-
-    dist.destroy_process_group()        
+    logging.info(end - start)       
