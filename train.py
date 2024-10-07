@@ -28,7 +28,7 @@ def count_parameters():
 
 def save_checkpoint(model):
  
-    torch.save({'model_state': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, 'sfno_ckpt_amp_3_small.tar')
+    torch.save({'model_state': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, 'sfno_ckpt_small.tar')
 
 def restore_checkpoint(checkpoint_path, model):
 
@@ -50,8 +50,8 @@ class GetDataset(Dataset):
         self.dt = 1
         self.n_history = 1
         self.RR = RR
-        self.in_chan = 13
-        self.out_chan = 12
+        self.in_chan = 35
+        self.out_chan = 34
 
         self.normalise = True #by default turn on normalization if not specified in config
         self._get_files_stats()
@@ -84,28 +84,57 @@ class GetDataset(Dataset):
         data[5] = regridder(data[5])
         data[6] = regridder(data[6])
 
+        data[0] = data[0][:,0:8,:,:]
+        data[1] = data[1][:,0:8,:,:]
+        data[5] = data[5][:,0:8,:,:]
+        data[6] = data[6][:,0:8,:,:]
+
+        
+        sfc_press_mean = data[2].collapsed('time', iris.analysis.MEAN)
+        sfc_temp_mean = data[3].collapsed('time', iris.analysis.MEAN)
+
         temp_mean = data[0].collapsed('time', iris.analysis.MEAN)
+        geop_mean = data[1].collapsed('time', iris.analysis.MEAN)
         u_mean = data[5].collapsed('time', iris.analysis.MEAN)
         v_mean = data[6].collapsed('time', iris.analysis.MEAN)
 
+        sfc_press_std = data[2].collapsed('time', iris.analysis.STD_DEV)
+        sfc_temp_std = data[3].collapsed('time', iris.analysis.STD_DEV)
+
         temp_std = data[0].collapsed('time', iris.analysis.STD_DEV)
+        geop_std = data[1].collapsed('time', iris.analysis.STD_DEV)
         u_std = data[5].collapsed('time', iris.analysis.STD_DEV)
         v_std = data[6].collapsed('time', iris.analysis.STD_DEV)
+        
+        data[2] = (data[2] - sfc_press_mean) / (1e-8 + sfc_press_std)
+        data[3] = (data[3] - sfc_temp_mean) / (1e-8 + sfc_temp_std)
 
         data[0] = (data[0] - temp_mean) / (1e-8 + temp_std)
+        data[1] = (data[1] - geop_mean) / (1e-8 + geop_std)
         data[5] = (data[5] - u_mean) / (1e-8 + u_std)
         data[6] = (data[6] - v_mean) / (1e-8 + v_std)
 
         self.cubes = []
         self.surf = []
-        for i in [0,5,6]:
+        for i in [0,1,5,6]:
 
-            self.cubes.append(data[i].data[:,4:8,:,:])
+            self.cubes.append(data[i].data)
+        
+        for i in [2,3]:
 
+            self.surf.append(data[i].data)
 
+        self.surf = np.stack(self.surf)
         self.cubes = np.stack(self.cubes)
+        
+        
         self.cubes = np.transpose(self.cubes, (1, 0, 2, 3, 4))
-        self.cubes = np.reshape(self.cubes, (self.n_samples_per_cube, self.out_chan, self.img_shape_y, self.img_shape_x))
+
+        self.cubes = np.reshape(self.cubes, (self.out_chan-2, self.n_samples_per_cube, self.img_shape_y, self.img_shape_x))
+    
+        self.cubes = np.concatenate((self.surf, self.cubes), axis=0)
+
+        self.cubes = np.transpose(self.cubes, (1, 0, 2, 3))
 
         self.output = np.reshape(self.cubes, (self.n_samples_per_cube,self.out_chan, self.img_shape_y, self.img_shape_x)) #quick test, only use 950 hPa temperature
         
@@ -180,16 +209,16 @@ if __name__ == '__main__':
 
     logging.info("World size: {}, local rank: {}".format(world_size, local_rank))
 
-    path1 = "data/omega/"
-    path2 = "data/omega_0_5/"
-    path3 = "data/omega_4/"
+    path1 = "data/omega_0_5/"
+    path2 = "data/omega/"
+    path3 = "data/omega_2/"
 
     Y, X = np.meshgrid(np.linspace(-90, 90, 90), np.linspace(0, 361, 144))
     Yp, Xp = np.meshgrid(np.linspace(0, 4, 4), np.linspace(-90, 90, 90))
 
-    dataset1 = GetDataset(path1, 1)
-    dataset2 = GetDataset(path2, 5)
-    dataset3 = GetDataset(path3, 10)
+    dataset1 = GetDataset(path1, 0.5)
+    dataset2 = GetDataset(path2, 1)
+    dataset3 = GetDataset(path3, 2)
 
     sampler1 = DistributedSampler(dataset1, shuffle=True) if world_size > 1 else None
     sampler2 = DistributedSampler(dataset2, shuffle=True) if world_size > 1 else None
@@ -229,9 +258,9 @@ if __name__ == '__main__':
 
     model = SFNO(params={},spectral_transform="sht",filter_type='linear',img_shape=(90, 144), in_chans=in_channels,
                                          out_chans=out_channels,
-                                        num_layers=10,operator_type='dhconv',scale_factor=1,spectral_layers=4, embed_dim=256)
+                                        num_layers=8,operator_type='dhconv',scale_factor=1,spectral_layers=4, embed_dim=256)
     
-    restore_checkpoint('sfno_ckpt_amp_3_small.tar', model)  
+    #restore_checkpoint('sfno_ckpt_small.tar', model)  
 
     model.to(device)
 
@@ -256,9 +285,9 @@ if __name__ == '__main__':
     
 #     1 for 1, 5 for 0.5
 
-    RR_1 = torch.full((params.batch_size,1,90,144), 1).to(device, dtype = torch.float)
-    RR_2 = torch.full((params.batch_size,1,90,144), 5).to(device, dtype = torch.float)
-    RR_3 = torch.full((params.batch_size,1,90,144),10).to(device, dtype = torch.float)
+    RR_1 = torch.full((params.batch_size,1,90,144), 0.5).to(device, dtype = torch.float)
+    RR_2 = torch.full((params.batch_size,1,90,144), 1).to(device, dtype = torch.float)
+    RR_3 = torch.full((params.batch_size,1,90,144), 2).to(device, dtype = torch.float)
 
     scheduler = CosineAnnealingLR(optimizer, T_max=params.max_epochs)
    
