@@ -28,7 +28,7 @@ def count_parameters():
 
 def save_checkpoint(model):
  
-    torch.save({'model_state': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, 'sfno_ckpt_amp_3_small.tar')
+    torch.save({'model_state': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, 'sfno_ckpt.tar')
 
 def restore_checkpoint(checkpoint_path, model):
 
@@ -53,22 +53,22 @@ class GetDataset(Dataset):
         self.dt = 1
         self.n_history = 1
         self.RR = RR
-        self.in_chan = 13
-        self.out_chan = 12
+        self.in_chan = 37
+        self.out_chan = 36
 
         self.normalise = True #by default turn on normalization if not specified in config
         self._get_files_stats()
     def _get_files_stats(self):
-        self.files_paths = glob.glob(self.location + "/umglaa.pc000000480_00") #collect .pc files within omega directory
+        self.files_paths = glob.glob(self.location + "omega_all_***.nc") #collect .pc files within omega directory
         self.files_paths.sort()
         self.n_years = len(self.files_paths)
         print("files: ", len(self.files_paths))
         
-        self.n_samples_per_cube = 160
+        self.n_samples_per_cube = 2080
         self.img_shape_x = 144
         self.img_shape_y =90
  
-        self.n_samples_total = 100#self.n_samples_per_cube * self.n_years
+        self.n_samples_total = 1000#self.n_samples_per_cube * self.n_years
 
         self.files = [None for _ in range(self.n_years)]
 
@@ -87,23 +87,31 @@ class GetDataset(Dataset):
         data[5] = regridder(data[5])
         data[6] = regridder(data[6])
 
+        data[0] = data[0][:,0:8,:,:]
+        data[1] = data[1][:,0:8,:,:]
+        data[5] = data[5][:,0:8,:,:]
+        data[6] = data[6][:,0:8,:,:]
+
         self.temp_mean = data[0].collapsed('time', iris.analysis.MEAN)
+        self.geop_mean = data[1].collapsed('time', iris.analysis.MEAN)
         self.u_mean = data[5].collapsed('time', iris.analysis.MEAN)
         self.v_mean = data[6].collapsed('time', iris.analysis.MEAN)
 
         self.temp_std = data[0].collapsed('time', iris.analysis.STD_DEV)
+        self.geop_std = data[1].collapsed('time', iris.analysis.STD_DEV)
         self.u_std = data[5].collapsed('time', iris.analysis.STD_DEV)
         self.v_std = data[6].collapsed('time', iris.analysis.STD_DEV)
 
         data[0] = (data[0] - self.temp_mean) / (1e-8 + self.temp_std)
+        data[1] = (data[1] - self.geop_mean) / (1e-8 + self.geop_std)
         data[5] = (data[5] - self.u_mean) / (1e-8 + self.u_std)
         data[6] = (data[6] - self.v_mean) / (1e-8 + self.v_std)
 
         self.cubes = []
         self.surf = []
-        for i in [0,5,6]:
+        for i in [0,1,5,6]:
 
-            self.cubes.append(data[i].data[:,4:8,:,:])
+            self.cubes.append(data[i].data)
 
 
         self.cubes = np.stack(self.cubes)
@@ -172,12 +180,12 @@ if __name__ == '__main__':
     
     path1 = "data/omega/"
     path2 = "data/omega_0_5/"
-    path3 = "data/omega_4/"
+    path3 = "data/omega_2/"
 
     Y, X = np.meshgrid(np.linspace(-90, 90, 90), np.linspace(0, 361, 144))
-    Yp, Xp = np.meshgrid(np.linspace(0, 4, 4), np.linspace(-90, 90, 90))
+    Yp, Xp = np.meshgrid(np.linspace(0, 9, 9), np.linspace(-90, 90, 90))
 
-    dataset1 = GetDataset(path3, 10)
+    dataset1 = GetDataset(path3, 2)
     #dataset2 = GetDataset(path2, 5)
     #dataset3 = GetDataset(path3, 10)
 
@@ -215,9 +223,9 @@ if __name__ == '__main__':
 
     model = SFNO(params={},spectral_transform="sht",filter_type='linear',img_shape=(90, 144), in_chans=in_channels,
                                          out_chans=out_channels,
-                                        num_layers=10,operator_type='dhconv',scale_factor=1,spectral_layers=4, embed_dim=256)
+                                        num_layers=8,operator_type='dhconv',scale_factor=1,spectral_layers=4, embed_dim=256)
     
-    restore_checkpoint('sfno_ckpt_amp_3_small.tar', model)  
+    restore_checkpoint('sfno_ckpt_small.tar', model)  
 
     model.to(device)
 
@@ -234,8 +242,8 @@ if __name__ == '__main__':
 #     1 for 1, 5 for 0.5
 
     RR_1 = torch.full((1,1,90,144), 1).to(device, dtype = torch.float)
-    RR_2 = torch.full((1,1,90,144), 5).to(device, dtype = torch.float)
-    RR_3 = torch.full((1,1,90,144),10).to(device, dtype = torch.float)
+    RR_2 = torch.full((1,1,90,144), 0.5).to(device, dtype = torch.float)
+    RR_3 = torch.full((1,1,90,144), 2).to(device, dtype = torch.float)
 
     fig, (ax1, ax2) = plt.subplots(1,2, sharey=True)  
     
@@ -247,26 +255,35 @@ if __name__ == '__main__':
         inp1 = inp1.to(memory_format=torch.channels_last)
         tar1 = tar1.to(memory_format=torch.channels_last)
         
-        tar = tar1.detach().cpu().numpy()[:,4:8,:,:]*np.expand_dims(dataset1.temp_std.data[4:8,:,:], axis=0) + np.expand_dims(dataset1.temp_mean.data[4:8,:,:], axis=0)
+        tar = tar1.detach().cpu().numpy()[:,0:8,:,:]#*(np.expand_dims(dataset1.temp_std.data[:,:,:], axis=0) + 1e-8)  + np.expand_dims(dataset1.temp_mean.data[:,:,:], axis=0)
     
         if i == 0:
             gen = model(inp1).to(device, dtype = torch.float)
-            predict = gen.detach().cpu().numpy()[:,4:8,:,:]*np.expand_dims(dataset1.temp_std.data[4:8,:,:], axis=0) + np.expand_dims(dataset1.temp_mean.data[4:8,:,:], axis=0)
+            predict = gen.detach().cpu().numpy()[:,0:8,:,:]#*(np.expand_dims(dataset1.temp_std.data[:,:,:], axis=0) + 1e-8) + np.expand_dims(dataset1.temp_mean.data[:,:,:], axis=0)
         else:
             inp = gen.detach()
             inp = torch.cat((inp, RR_3), axis=1).to(device, dtype = torch.float)               
             gen = model(inp).to(device, dtype = torch.float)
-            predict = gen.detach().cpu().numpy()[:,4:8,:,:]*np.expand_dims(dataset1.temp_std.data[4:8,:,:], axis=0) + np.expand_dims(dataset1.temp_mean.data[4:8,:,:], axis=0)
+            predict = gen.detach().cpu().numpy()[:,0:8,:,:]#*(np.expand_dims(dataset1.temp_std.data[:,:,:], axis=0) + 1e-8) + np.expand_dims(dataset1.temp_mean.data[:,:,:], axis=0)
 
-        contour1 = ax1.contourf(X, Y, predict[0,0,:,:].T, levels=30)
-        contour2 = ax2.contourf(X, Y, tar[0,0,:,:].T, levels=30)
-
+        contour1 = ax1.contourf(X, Y, predict[0,7,:,:].T, levels=30)
+        contour2 = ax2.contourf(X, Y, tar[0,7,:,:].T, levels=30)
+    
         ax1.set_xlabel("Longtiude (deg.)")
         ax2.set_xlabel("Longitude (deg.)")
         ax1.set_ylabel("Latitude (deg.)")
-        ax1.set_title("SFNO (4x)")
-        ax2.set_title("UM (4x)")
-        
+        #ax1.set_title("SFNO (4x)")
+        #ax2.set_title("UM (4x)")
+            
+        #contour1 = ax1.contourf(Xp, Yp, predict[0,:,:,0].T[::-1], levels=30)
+        #contour2 = ax2.contourf(Xp, Yp, tar[0,:,:,0].T[::-1], levels=30)
+
+        #ax1.set_xlabel("Latitude (deg.)")
+        #ax2.set_xlabel("Latitude (deg.)")
+        #ax1.set_ylabel("Model level")
+        ax1.set_title("SFNO (2x)")
+        ax2.set_title("UM (2x)")
+
 
         if i < 10:
             plt.savefig("plots/rollout_00{}.png".format(i))
